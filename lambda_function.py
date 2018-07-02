@@ -25,21 +25,32 @@ def lambda_handler(event, context):
     if "AudioStream" in response:
         stream = response["AudioStream"]
         with contextlib.closing(stream):
-
             output_file = bucket.Object(output)
             output_file.put(Body=stream.read())
+
+    will_publish = True
+    ctx = event.get("requestContext")
+    if ctx is not None:
+        if ctx.get("stage") in ("test", "testing", "dev"):
+            if json_data.get("testing"):
+                will_publish = False
+
     payload = json.dumps({
         "message": json_data["message"],
         "uri": s3.generate_presigned_url("get_object", Params={
             "Bucket": BUCKET_NAME,
             "Key": output
-        })
+        }),
+        "published": will_publish
     })
     args = {
         "topic": "noticast-messages",
         "payload": payload
     }
-    iot.publish(**args)
+
+    if will_publish:
+        iot.publish(**args)
+
     return {
         "statusCode": 200,
         "body": json.dumps(payload)
