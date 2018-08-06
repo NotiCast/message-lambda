@@ -2,8 +2,25 @@ import contextlib
 import datetime
 import json
 import uuid
+import os
 
 import boto3
+
+from rds_models import Device, Group
+
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+DB_ITEMS = {
+    "endpoint": os.environ["sqlalchemy_db_endpoint"],
+    "auth": os.environ["sqlalchemy_db_auth"],
+    "name": os.environ["sqlalchemy_db_name"]
+}
+
+engine = create_engine(("mysql+pymysql://"
+                        "{auth}@{endpoint}/{name}").format(**DB_ITEMS))
+Session = sessionmaker(bind=engine)
+session = Session()
 
 BUCKET_NAME = "noticast-messages"
 DEFAULT_VOICE = "Salli"
@@ -16,18 +33,41 @@ iot = boto3.client('iot-data')
 
 def lambda_handler(event, context):
     json_data = json.loads(event["body"])
+    devices = []
+
+    # Check whether `target` is Device or Group {{{
+    arn = json_data["target"]
+    item = session.query(Device).filter_by(arn=arn).first()
+    if item is not None:
+        # Found a device
+        devices.append(item)
+    else:
+        # Check if `target` is Group
+        group = session.query(Group).filter_by(arn=arn).first()
+        if group is not None:
+            devices.extend(group.devices)
+    # }}}
+
+    device_json = [{"arn": d.arn, "name": d.name} for d in devices]
+
+    # Generate mp3 file {{{
     response = polly.synthesize_speech(
         OutputFormat="mp3",
         Text=json_data["message"],
         TextType="text",
         VoiceId=json_data.get("voice_id", DEFAULT_VOICE))
     output = str(uuid.uuid4()) + ".mp3"
+
+    return {"statusCode": "200", "body": "%s" % json.dumps(device_json.merge({"stage": "2"}))}
+
     if "AudioStream" in response:
         stream = response["AudioStream"]
         with contextlib.closing(stream):
             output_file = bucket.Object(output)
             output_file.put(Body=stream.read())
+    # }}}
 
+    # Publish notification {{{
     will_publish = True
     ctx = event.get("requestContext")
     if ctx is not None:
@@ -50,6 +90,11 @@ def lambda_handler(event, context):
 
     if will_publish:
         iot.publish(**args)
+        for device in devices:
+            iot.publish(**args.merge({
+                "topic": device.arn
+            }))
+    # }}}
 
     return {
         "statusCode": 200,
