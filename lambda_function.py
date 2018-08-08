@@ -48,8 +48,6 @@ def lambda_handler(event, context):
             devices.extend(group.devices)
     # }}}
 
-    device_json = [{"arn": d.arn, "name": d.name} for d in devices]
-
     # Generate mp3 file {{{
     response = polly.synthesize_speech(
         OutputFormat="mp3",
@@ -57,8 +55,6 @@ def lambda_handler(event, context):
         TextType="text",
         VoiceId=json_data.get("voice_id", DEFAULT_VOICE))
     output = str(uuid.uuid4()) + ".mp3"
-
-    return {"statusCode": "200", "body": "%s" % json.dumps(device_json.merge({"stage": "2"}))}
 
     if "AudioStream" in response:
         stream = response["AudioStream"]
@@ -91,9 +87,9 @@ def lambda_handler(event, context):
     if will_publish:
         iot.publish(**args)
         for device in devices:
-            iot.publish(**args.merge({
-                "topic": device.arn
-            }))
+            args.update(topic=device.arn)
+            iot.publish(**args)
+
     # }}}
 
     return {
