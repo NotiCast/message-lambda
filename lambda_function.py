@@ -95,7 +95,8 @@ def lambda_handler(event, context):
     }
     args = {
         "topic": "noticast-messages",
-        "payload": json.dumps(payload)
+        "payload": json.dumps(payload),
+        "qos": 1
     }
 
     if will_publish:
