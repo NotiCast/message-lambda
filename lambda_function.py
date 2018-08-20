@@ -31,8 +31,12 @@ bucket = boto3.resource('s3').Bucket(BUCKET_NAME)
 iot = boto3.client('iot-data')
 
 
-def http_error_from_exception(exc):
-    return {"statusCode": 400, "body": json.dumps({
+class TargetNotFoundError(Exception):
+    pass
+
+
+def http_error_from_exception(exc, status_code=400):
+    return {"statusCode": status_code, "body": json.dumps({
             "message": str(exc), "type": str(type(exc))})}
 
 
@@ -57,6 +61,8 @@ def lambda_handler(event, _context):
             return http_error_from_exception(e)
         except KeyError as e:
             return http_error_from_exception(e)
+        except TargetNotFoundError as e:
+            return http_error_from_exception(e, status_code=404)
     elif "Records" in event:  # E-Mail API
         print(event)
     else:
@@ -70,6 +76,7 @@ def send_message(arn, text, voice_id=DEFAULT_VOICE):
     # Check whether `target` is Device or Group {{{
     is_group = False
     item = session.query(Device).filter_by(arn=arn).first()
+    print("item:", item)
     if item is not None:
         # Found a device
         devices.append(item)
@@ -77,6 +84,7 @@ def send_message(arn, text, voice_id=DEFAULT_VOICE):
         # Check if `target` is Group
         group = session.query(Group).filter_by(arn=arn).first()
         if group is not None:
+            print("group:", group, group.devices)
             is_group = True
             devices.extend(group.devices)
     # }}}
