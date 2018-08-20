@@ -1,3 +1,4 @@
+# vim:set et sw=4 ts=4 foldmethod=marker:
 import contextlib
 import json
 import uuid
@@ -21,7 +22,7 @@ engine = create_engine(("mysql+pymysql://"
 Session = sessionmaker(bind=engine)
 session = Session()
 
-BUCKET_NAME = "noticast-messages"
+BUCKET_NAME = os.environ["messages_bucket"]
 DEFAULT_VOICE = "Salli"
 
 polly = boto3.client('polly')
@@ -30,25 +31,43 @@ bucket = boto3.resource('s3').Bucket(BUCKET_NAME)
 iot = boto3.client('iot-data')
 
 
-def error_from_exception(exc):
+def http_error_from_exception(exc):
     return {"statusCode": 400, "body": json.dumps({
             "message": str(exc), "type": str(type(exc))})}
 
 
-def lambda_handler(event, context):
-    try:
-        json_data = json.loads(event["body"])
-    except json.decoder.JSONDecodeError as e:
-        return error_from_exception(e)
+def mail_error(exc):
+    # can't really do much considering the callable is a relay
+    return
+
+
+def lambda_handler(event, _context):
+    if "body" in event:  # HTTP API
+        try:
+            json_data = json.loads(event["body"])
+            arn = json_data["target"]
+            text = json_data["message"]
+            return {
+                "statusCode": 200,
+                "body": json.dumps(send_message(
+                        arn, text, voice_id=json_data.get("voice_id",
+                                                          DEFAULT_VOICE)))
+            }
+        except json.decoder.JSONDecodeError as e:
+            return http_error_from_exception(e)
+        except KeyError as e:
+            return http_error_from_exception(e)
+    elif "Records" in event:  # E-Mail API
+        print(event)
+    else:
+        print(event)
+        print("== Unknown Event ==")
+
+
+def send_message(arn, text, voice_id=DEFAULT_VOICE):
     devices = []
 
     # Check whether `target` is Device or Group {{{
-    try:
-        arn = json_data["target"]
-        text = json_data["message"]
-    except KeyError as e:
-        return error_from_exception(e)
-
     is_group = False
     item = session.query(Device).filter_by(arn=arn).first()
     if item is not None:
@@ -67,7 +86,7 @@ def lambda_handler(event, context):
         OutputFormat="mp3",
         Text=text,
         TextType="text",
-        VoiceId=json_data.get("voice_id", DEFAULT_VOICE))
+        VoiceId=voice_id)
     output = str(uuid.uuid4()) + ".mp3"
 
     if "AudioStream" in response:
@@ -78,20 +97,12 @@ def lambda_handler(event, context):
     # }}}
 
     # Publish notification {{{
-    will_publish = True
-    ctx = event.get("requestContext")
-    if ctx is not None:
-        if ctx.get("stage") in ("test", "testing", "dev"):
-            if json_data.get("testing"):
-                will_publish = False
-
     payload = {
         "message": text,
         "uri": s3.generate_presigned_url("get_object", Params={
             "Bucket": BUCKET_NAME,
             "Key": output
-        }),
-        "published": will_publish
+        })
     }
     args = {
         "topic": "noticast-messages",
@@ -99,17 +110,12 @@ def lambda_handler(event, context):
         "qos": 1
     }
 
-    if will_publish:
+    iot.publish(**args)
+    for device in devices:
+        args.update(topic=device.arn)
         iot.publish(**args)
-        for device in devices:
-            args.update(topic=device.arn)
-            iot.publish(**args)
-
     # }}}
 
     payload.update(devices=[d.arn for d in devices], is_group=is_group)
 
-    return {
-        "statusCode": 200,
-        "body": json.dumps(payload)
-    }
+    return payload
