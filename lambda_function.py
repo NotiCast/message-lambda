@@ -3,6 +3,7 @@ import contextlib
 import json
 import uuid
 import os
+import re
 
 import boto3
 
@@ -23,6 +24,7 @@ Session = sessionmaker(bind=engine)
 session = Session()
 
 BUCKET_NAME = os.environ["messages_bucket"]
+EMAIL_DOMAIN = os.environ["email_domain"]
 DEFAULT_VOICE = "Salli"
 
 polly = boto3.client('polly')
@@ -40,11 +42,31 @@ def http_error_from_exception(exc, status_code=400):
             "message": str(exc), "type": str(type(exc))})}
 
 
-def mail_error(exc):
-    # can't really do much considering the callable is a relay
-    return
+def match_subject(message):
+    # Strip out any text containing "Fwd:"
+    while True:
+        for match in ["Fwd:"]:
+            if message[:len(match)] == match:
+                message = message[len(match):]
+        else:
+            # break the While loop after no match is found
+            break
+    return message
 
 
+def filter_subject(message):
+    # Skip messages with "Re: " spamming users with chains
+    for match in ["Re: "]:
+        if match in message:
+            return False
+    return True
+
+
+# Match ARN in email
+email_pattern = re.compile(r'([0-9A-Fa-f]+)@')
+
+
+# Dispatcher for various incoming requests {{{
 def lambda_handler(event, _context):
     if "body" in event:  # HTTP API
         try:
@@ -64,10 +86,34 @@ def lambda_handler(event, _context):
         except TargetNotFoundError as e:
             return http_error_from_exception(e, status_code=404)
     elif "Records" in event:  # E-Mail API
-        print(event)
+        mail = event["Records"][0]["ses"]["mail"]
+        headers = mail["commonHeaders"]
+        # Check headers
+        arns = []
+        subject = match_subject(headers["subject"])
+        print("Found subject", subject)
+        print("Headers:", headers)
+        if not filter_subject(subject):
+            return  # Filtered content
+        for segment in ["to", "cc"]:
+            if segment in headers:
+                for address in headers[segment]:
+                    print("is:", EMAIL_DOMAIN, "in:", address,
+                          EMAIL_DOMAIN in address)
+                    if EMAIL_DOMAIN in address:
+                        match = email_pattern.search(address)
+                        if match is not None:
+                            arns.append(match.groups()[0])
+        print("Targets:", arns)
+        for target in arns:
+            try:
+                send_message(target, subject)
+            except TargetNotFoundError as e:
+                pass
     else:
         print(event)
         print("== Unknown Event ==")
+# }}}
 
 
 def send_message(arn, text, voice_id=DEFAULT_VOICE):
@@ -75,14 +121,14 @@ def send_message(arn, text, voice_id=DEFAULT_VOICE):
 
     # Check whether `target` is Device or Group {{{
     is_group = False
-    item = session.query(Device).filter_by(arn=arn).first()
+    item = session.query(Device).filter(Device.arn.endswith(arn)).first()
     print("item:", item)
     if item is not None:
         # Found a device
         devices.append(item)
     else:
         # Check if `target` is Group
-        group = session.query(Group).filter_by(arn=arn).first()
+        group = session.query(Group).filter(Group.arn.startswith(arn)).first()
         if group is not None:
             print("group:", group, group.devices)
             is_group = True
