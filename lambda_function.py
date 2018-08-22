@@ -128,7 +128,7 @@ def send_message(arn, text, voice_id=DEFAULT_VOICE):
         devices.append(item)
     else:
         # Check if `target` is Group
-        group = session.query(Group).filter(Group.arn.startswith(arn)).first()
+        group = session.query(Group).filter(Group.arn.endswith(arn)).first()
         if group is not None:
             print("group:", group, group.devices)
             is_group = True
