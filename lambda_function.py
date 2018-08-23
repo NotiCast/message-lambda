@@ -7,10 +7,14 @@ import re
 
 import boto3
 
+from raven import Client
+
 from rds_models import Device, Group
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+
+raven = Client(os.environ["raven_endpoint"])
 
 DB_ITEMS = {
     "endpoint": os.environ["sqlalchemy_db_endpoint"],
@@ -76,8 +80,9 @@ def lambda_handler(event, _context):
             return {
                 "statusCode": 200,
                 "body": json.dumps(send_message(
-                        arn, text, voice_id=json_data.get("voice_id",
-                                                          DEFAULT_VOICE)))
+                        arn, text,
+                        text_type=json_data.get("message_type", "text"),
+                        voice_id=json_data.get("voice_id", DEFAULT_VOICE)))
             }
         except json.decoder.JSONDecodeError as e:
             return http_error_from_exception(e)
@@ -85,6 +90,15 @@ def lambda_handler(event, _context):
             return http_error_from_exception(e)
         except TargetNotFoundError as e:
             return http_error_from_exception(e, status_code=404)
+        except Exception as e:
+            body = event["body"]
+            raven.user_context(dict(system="json+http"))
+            raven.user_context(payload=event["body"])
+            try:
+                raven.user_context(json_payload=json.loads(body))
+            except Exception as e:
+                pass
+            raven.captureException(e)
     elif "Records" in event:  # E-Mail API
         mail = event["Records"][0]["ses"]["mail"]
         headers = mail["commonHeaders"]
@@ -110,13 +124,17 @@ def lambda_handler(event, _context):
                 send_message(target, subject)
             except TargetNotFoundError as e:
                 pass
+            except Exception as e:
+                raven.user_context(dict(system="email"))
+                raven.user_context(dict(target=target, message=subject))
+                raven.captureException(e)
     else:
         print(event)
         print("== Unknown Event ==")
 # }}}
 
 
-def send_message(arn, text, voice_id=DEFAULT_VOICE):
+def send_message(arn, text, voice_id=DEFAULT_VOICE, text_type="text"):
     devices = []
 
     # Check whether `target` is Device or Group {{{
@@ -139,7 +157,7 @@ def send_message(arn, text, voice_id=DEFAULT_VOICE):
     response = polly.synthesize_speech(
         OutputFormat="mp3",
         Text=text,
-        TextType="text",
+        TextType=text_type,
         VoiceId=voice_id)
     output = str(uuid.uuid4()) + ".mp3"
 
