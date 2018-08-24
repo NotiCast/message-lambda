@@ -93,12 +93,13 @@ def lambda_handler(event, _context):
         except Exception as e:
             body = event["body"]
             raven.user_context(dict(system="json+http"))
-            raven.user_context(payload=event["body"])
+            raven.user_context(dict(payload=event["body"]))
             try:
-                raven.user_context(json_payload=json.loads(body))
+                raven.user_context(dict(json_payload=json.loads(body)))
             except Exception as e:
                 pass
-            raven.captureException(e)
+            raven.captureException()
+            return http_error_from_exception(e, status_code=500)
     elif "Records" in event:  # E-Mail API
         mail = event["Records"][0]["ses"]["mail"]
         headers = mail["commonHeaders"]
@@ -127,7 +128,7 @@ def lambda_handler(event, _context):
             except Exception as e:
                 raven.user_context(dict(system="email"))
                 raven.user_context(dict(target=target, message=subject))
-                raven.captureException(e)
+                raven.captureException()
     else:
         print(event)
         print("== Unknown Event ==")
@@ -154,12 +155,14 @@ def send_message(arn, text, voice_id=DEFAULT_VOICE, text_type="text"):
     # }}}
 
     # Generate mp3 file {{{
+    message_id = str(uuid.uuid4())
+
     response = polly.synthesize_speech(
         OutputFormat="mp3",
         Text=text,
         TextType=text_type,
         VoiceId=voice_id)
-    output = str(uuid.uuid4()) + ".mp3"
+    output = message_id + ".mp3"
 
     if "AudioStream" in response:
         stream = response["AudioStream"]
@@ -171,6 +174,7 @@ def send_message(arn, text, voice_id=DEFAULT_VOICE, text_type="text"):
     # Publish notification {{{
     payload = {
         "message": text,
+        "message_id": message_id,
         "uri": s3.generate_presigned_url("get_object", Params={
             "Bucket": BUCKET_NAME,
             "Key": output
